@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>AutoMoodPlayer - Web (Server webcam)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root{--bg:#071427;--card:#0b1220;--accent:#2563eb;--text:#e6eef8;--muted:#9fb0ce;}
+    *{box-sizing:border-box;font-family:Inter,system-ui,Arial,sans-serif;}
+    body{margin:0;min-height:100vh;background:linear-gradient(180deg,#071025,#081229);color:var(--text);display:flex;align-items:center;justify-content:center;padding:24px;}
+    .container{width:100%;max-width:980px;background:rgba(8,14,22,0.6);padding:20px;border-radius:12px;}
+    h1{text-align:center;margin:6px 0 18px;font-size:28px;}
+    .top{display:flex;gap:18px;align-items:flex-start;}
+    .video-box{flex:1;background:var(--card);height:480px;border-radius:8px;display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative;}
+    .video-box img{width:100%;height:100%;object-fit:cover;}
+    .info{width:320px;background:rgba(255,255,255,0.03);padding:16px;border-radius:8px;}
+    .info p{margin:8px 0;font-size:16px;}
+    .controls{display:flex;gap:12px;justify-content:center;margin-top:18px;}
+    button{padding:10px 18px;border-radius:10px;border:0;background:var(--accent);color:white;font-weight:600;cursor:pointer;}
+    button.secondary{background:#999;}
+    footer{text-align:center;margin-top:14px;color:var(--muted);font-size:13px;}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🎵 AutoMoodPlayer — Server Camera</h1>
+
+    <div class="top">
+      <div class="video-box">
+        <!-- MJPEG stream appears here -->
+        <img id="mjpeg" src="/video_feed" alt="video stream">
+      </div>
+
+      <div class="info">
+        <p id="detected">Detected: —</p>
+        <p id="locked">Locked: —</p>
+        <p id="confidence">Confidence: —</p>
+        <p id="song">🎵 No song assigned</p>
+        <p id="status">Status: idle</p>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button id="startBtn">▶ Start Polling</button>
+      <button id="stopBtn" class="secondary" disabled>⏸ Stop Polling</button>
+      <button id="stopSongBtn" class="secondary">⏹ Stop Song</button>
+    </div>
+
+    <audio id="player" controls style="width:100%;margin-top:12px;display:none;"></audio>
+
+    <footer>Developed by Kartik • FER + OpenCV + Flask</footer>
+  </div>
+
+  <script>
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const stopSongBtn = document.getElementById("stopSongBtn");
+    const detectedP = document.getElementById("detected");
+    const lockedP = document.getElementById("locked");
+    const confP = document.getElementById("confidence");
+    const songP = document.getElementById("song");
+    const statusP = document.getElementById("status");
+    const player = document.getElementById("player");
+
+    let pollTimer = null;
+    let pollingInterval = 900; // ms
+
+    let assignedSongUrl = null;
+    let assignedSongFilename = null;
+    let assignedSongPlaying = false;
+
+    async function pollState(){
+      try {
+        const res = await fetch("/get_state");
+        const data = await res.json();
+
+        detectedP.textContent = "Detected: " + (data.next_emotion || "—");
+        lockedP.textContent = "Locked: " + (data.locked_emotion || "—");
+        confP.textContent = "Confidence: " + ((data.confidence||0)*100).toFixed(1) + "%";
+        songP.textContent = data.song_filename ? ("Assigned: " + data.song_filename) : "🎵 No song assigned";
+        statusP.textContent = data.song_playing ? "Song playing" : (data.song_assigned ? "Assigned, waiting to start" : "Idle / Ready");
+
+        // If server assigned a song and client isn't already playing it, start playback
+        if (data.song_url && !data.song_playing && !assignedSongPlaying) {
+          // start playback
+          assignedSongUrl = data.song_url;
+          assignedSongFilename = data.song_filename;
+
+          player.src = assignedSongUrl;
+          player.style.display = "block";
+          const playPromise = player.play();
+          if (playPromise !== undefined) {
+            playPromise.then(() => {
+              // notify server that song started
+              fetch("/song_started", {method:"POST"}).catch(()=>{});
+              assignedSongPlaying = true;
+            }).catch((err)=>{
+              console.warn("Playback failed:", err);
+              statusP.textContent = "Playback blocked — user interaction needed";
+            });
+          } else {
+            // older browsers
+            fetch("/song_started", {method:"POST"}).catch(()=>{});
+            assignedSongPlaying = true;
+          }
+        }
+
+      } catch (err) {
+        console.error("Poll error:", err);
+        statusP.textContent = "Poll error";
+      }
+    }
+
+    function startPolling(){
+      if (pollTimer) return;
+      pollState(); // initial immediately
+      pollTimer = setInterval(pollState, pollingInterval);
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      statusP.textContent = "Polling server...";
+    }
+
+    function stopPolling(){
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      statusP.textContent = "Stopped polling";
+    }
+
+    // When song ends (naturally) notify server
+    player.addEventListener("ended", ()=>{
+      fetch("/song_ended", {method:"POST"}).catch(()=>{});
+      assignedSongPlaying = false;
+      assignedSongUrl = null;
+      assignedSongFilename = null;
+      player.style.display = "none";
+      player.src = "";
+      statusP.textContent = "Song ended";
+    });
+
+    // Manual stop button (client stops audio)
+    stopSongBtn.addEventListener("click", ()=>{
+      if (assignedSongPlaying) {
+        player.pause();
+        player.currentTime = 0;
+        fetch("/song_ended", {method:"POST"}).catch(()=>{});
+        assignedSongPlaying = false;
+        assignedSongUrl = null;
+        assignedSongFilename = null;
+        player.style.display = "none";
+        player.src = "";
+        statusP.textContent = "Song manually stopped";
+      } else {
+        statusP.textContent = "No song playing";
+      }
+    });
+
+    startBtn.addEventListener("click", startPolling);
+    stopBtn.addEventListener("click", stopPolling);
+
+    // If the browser prevents autoplay, user can click anywhere to enable audio permission.
+    document.body.addEventListener("click", () => {
+      if (player && assignedSongUrl && player.paused) {
+        player.play().then(()=>{}).catch(()=>{});
+      }
+    });
+  </script>
+</body>
+</html>
